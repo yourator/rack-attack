@@ -1,5 +1,7 @@
 require:
+  - rubocop-minitest
   - rubocop-performance
+  - rubocop-rake
 
 inherit_mode:
   merge:
@@ -8,6 +10,7 @@ inherit_mode:
 AllCops:
   TargetRubyVersion: 2.4
   DisabledByDefault: true
+  NewCops: disable
   Exclude:
     - "examples/instrumentation.rb"
     - "gemfiles/**/*"
@@ -21,10 +24,25 @@ Gemspec:
 Layout:
   Enabled: true
 
+Layout/EmptyLinesAroundAttributeAccessor: # (0.83)
+  Enabled: true
+
+Layout/SpaceAroundMethodCallOperator: # (0.82)
+  Enabled: true
+
 Layout/LineLength:
   Max: 120
 
 Lint:
+  Enabled: true
+
+Lint/DeprecatedOpenSSLConstant: # (0.84)
+  Enabled: true
+
+Lint/RaiseException: # (0.81)
+  Enabled: true
+
+Lint/StructNewOverride: # (0.81)
   Enabled: true
 
 Naming:
@@ -39,10 +57,6 @@ Security:
   Enabled: true
 
 Style/BlockDelimiters:
-  Enabled: true
-  IgnoredMethods: [] # Workaround rubocop bug: https://github.com/rubocop-hq/rubocop/issues/6179
-
-Style/BracesAroundHashParameters:
   Enabled: true
 
 Style/ClassAndModuleChildren:

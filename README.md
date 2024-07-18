@@ -1,5 +1,5 @@
-__Note__: You are viewing the development version README.
-For the README consistent with the latest released version see https://github.com/kickstarter/rack-attack/blob/6-stable/README.md.
+:warning:  You are viewing the development's branch version of README which might contain documentation for unreleased features.
+For the README consistent with the latest released version see https://github.com/rack/rack-attack/blob/6-stable/README.md.
 
 # Rack::Attack
 
@@ -10,7 +10,7 @@ Protect your Rails and Rack apps from bad clients. Rack::Attack lets you easily 
 See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-hacking/rack-attack-protection-from-abusive-clients) introducing Rack::Attack.
 
 [![Gem Version](https://badge.fury.io/rb/rack-attack.svg)](https://badge.fury.io/rb/rack-attack)
-[![Build Status](https://travis-ci.org/kickstarter/rack-attack.svg?branch=master)](https://travis-ci.org/kickstarter/rack-attack)
+[![build](https://github.com/rack/rack-attack/actions/workflows/build.yml/badge.svg)](https://github.com/rack/rack-attack/actions/workflows/build.yml)
 [![Code Climate](https://codeclimate.com/github/kickstarter/rack-attack.svg)](https://codeclimate.com/github/kickstarter/rack-attack)
 [![Join the chat at https://gitter.im/rack-attack/rack-attack](https://badges.gitter.im/rack-attack/rack-attack.svg)](https://gitter.im/rack-attack/rack-attack)
 
@@ -40,7 +40,6 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
 - [Testing](#testing)
 - [How it works](#how-it-works)
   - [About Tracks](#about-tracks)
-- [Testing](#testing)
 - [Performance](#performance)
 - [Motivation](#motivation)
 - [Contributing](#contributing)
@@ -136,7 +135,7 @@ E.g.
 # Provided that trusted users use an HTTP request header named APIKey
 Rack::Attack.safelist("mark any authenticated access safe") do |request|
   # Requests are allowed if the return value is truthy
-  request.env["APIKey"] == "secret-string"
+  request.env["HTTP_APIKEY"] == "secret-string"
 end
 
 # Always allow requests from localhost
@@ -259,10 +258,12 @@ Rack::Attack.throttle("requests by ip", limit: 5, period: 2) do |request|
 end
 
 # Throttle login attempts for a given email parameter to 6 reqs/minute
-# Return the email as a discriminator on POST /login requests
+# Return the *normalized* email as a discriminator on POST /login requests
 Rack::Attack.throttle('limit logins per email', limit: 6, period: 60) do |req|
   if req.path == '/login' && req.post?
-    req.params['email']
+    # Normalize the email, using the same logic as your authentication process, to
+    # protect against rate limit bypasses.
+    req.params['email'].to_s.downcase.gsub(/\s+/, "")
   end
 end
 
@@ -290,7 +291,7 @@ Rack::Attack.track("special_agent", limit: 6, period: 60) do |req|
 end
 
 # Track it using ActiveSupport::Notification
-ActiveSupport::Notifications.subscribe("track.rack_attack") do |name, start, finish, request_id, payload|
+ActiveSupport::Notifications.subscribe("track.rack_attack") do |name, start, finish, instrumenter_id, payload|
   req = payload[:request]
   if req.env['rack.attack.matched'] == "special_agent"
     Rails.logger.info "special_agent: #{req.path}"
@@ -301,26 +302,31 @@ end
 
 ### Cache store configuration
 
-Throttle, allow2ban and fail2ban state is stored in a configurable cache (which defaults to `Rails.cache` if present), presumably backed by memcached or redis ([at least gem v3.0.0](https://rubygems.org/gems/redis)).
+Throttle, track, allow2ban and fail2ban state is stored in a configurable cache (which defaults to `Rails.cache` if present), presumably backed by memcached or redis ([at least gem v3.0.0](https://rubygems.org/gems/redis)).
 
 ```ruby
-Rack::Attack.cache.store = ActiveSupport::Cache::MemoryStore.new # defaults to Rails.cache
+# This is the default
+Rack::Attack.cache.store = Rails.cache 
+# It is recommended to use a separate database for throttling/allow2ban/fail2ban.
+Rack::Attack.cache.store = ActiveSupport::Cache::RedisCacheStore.new(url: "...") 
 ```
 
-Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment` and `write` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html).
+Most applications should use a new, separate database used only for `rack-attack`. During an actual attack or periods of heavy load, this database will come under heavy load. Keeping it on a separate database instance will give you additional resilience and make sure that other functions (like caching for your application) don't go down.
+
+Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment` and `write` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html). This means that other cache stores which inherit from ActiveSupport::Cache::Store are also compatible. In-memory stores which are not backed by an external database, such as `ActiveSupport::Cache::MemoryStore.new`, will be mostly ineffective because each Ruby process in your deployment will have it's own state, effectively multiplying the number of requests each client can make by the number of Ruby processes you have deployed.
 
 ## Customizing responses
 
-Customize the response of blocklisted and throttled requests using an object that adheres to the [Rack app interface](http://www.rubydoc.info/github/rack/rack/file/SPEC).
+Customize the response of blocklisted and throttled requests using an object that adheres to the [Rack app interface](http://www.rubydoc.info/github/rack/rack/file/SPEC.rdoc).
 
 ```ruby
-Rack::Attack.blocklisted_callback = lambda do |request|
+Rack::Attack.blocklisted_responder = lambda do |request|
   # Using 503 because it may make attacker think that they have successfully
   # DOSed the site. Rack::Attack returns 403 for blocklists by default
   [ 503, {}, ['Blocked']]
 end
 
-Rack::Attack.throttled_callback = lambda do |request|
+Rack::Attack.throttled_responder = lambda do |request|
   # NB: you have access to the name and other data about the matched throttle
   #  request.env['rack.attack.matched'],
   #  request.env['rack.attack.match_type'],
@@ -346,8 +352,8 @@ Rack::Attack.throttled_response_retry_after_header = true
 Here's an example response that includes conventional `RateLimit-*` headers:
 
 ```ruby
-Rack::Attack.throttled_response = lambda do |env|
-  match_data = env['rack.attack.match_data']
+Rack::Attack.throttled_responder = lambda do |request|
+  match_data = request.env['rack.attack.match_data']
   now = match_data[:epoch_time]
 
   headers = {
@@ -373,11 +379,11 @@ Rack::Attack uses the [ActiveSupport::Notifications](http://api.rubyonrails.org/
 
 You can subscribe to `rack_attack` events and log it, graph it, etc.
 
-To get notified about specific type of events, subscribe to the event name followed by the `rack_attack` namesapce.
+To get notified about specific type of events, subscribe to the event name followed by the `rack_attack` namespace.
 E.g. for throttles use:
 
 ```ruby
-ActiveSupport::Notifications.subscribe("throttle.rack_attack") do |name, start, finish, request_id, payload|
+ActiveSupport::Notifications.subscribe("throttle.rack_attack") do |name, start, finish, instrumenter_id, payload|
   # request object available in payload[:request]
 
   # Your code here
@@ -387,7 +393,7 @@ end
 If you want to subscribe to every `rack_attack` event, use:
 
 ```ruby
-ActiveSupport::Notifications.subscribe(/rack_attack/) do |name, start, finish, request_id, payload|
+ActiveSupport::Notifications.subscribe(/rack_attack/) do |name, start, finish, instrumenter_id, payload|
   # request object available in payload[:request]
 
   # Your code here
@@ -396,13 +402,17 @@ end
 
 ## Testing
 
+A note on developing and testing apps using Rack::Attack - if you are using throttling in particular, you will
+need to enable the cache in your development environment. See [Caching with Rails](http://guides.rubyonrails.org/caching_with_rails.html)
+for more on how to do this.
+
 ### Disabling
 
 `Rack::Attack.enabled = false` can be used to either completely disable Rack::Attack in your tests, or to disable/enable for specific test cases only.
 
 ### Test case isolation
 
-`Rack::Attack.reset!` can be used in your test suite to clear any Rack::Attack state between different test cases.
+`Rack::Attack.reset!` can be used in your test suite to clear any Rack::Attack state between different test cases. If you're testing blocklist and safelist configurations, consider using `Rack::Attack.clear_configuration` to unset the values for those lists between test cases.
 
 ## How it works
 
@@ -422,10 +432,9 @@ def call(env)
   if safelisted?(req)
     @app.call(env)
   elsif blocklisted?(req)
-    self.class.blocklisted_callback.call(req)
+    self.class.blocklisted_responder.call(req)
   elsif throttled?(req)
-    self.class.throttled_response.call(env)
-    self.class.throttled_callback.call(req)
+    self.class.throttled_responder.call(req)
   else
     tracked?(req)
     @app.call(env)
@@ -440,13 +449,6 @@ can cleanly monkey patch helper methods onto the
 ### About Tracks
 
 `Rack::Attack.track` doesn't affect request processing. Tracks are an easy way to log and measure requests matching arbitrary attributes.
-
-
-## Testing
-
-A note on developing and testing apps using Rack::Attack - if you are using throttling in particular, you will
-need to enable the cache in your development environment. See [Caching with Rails](http://guides.rubyonrails.org/caching_with_rails.html)
-for more on how to do this.
 
 ## Performance
 
