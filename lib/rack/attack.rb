@@ -115,14 +115,14 @@ module Rack
         if configuration.blocklisted_response
           configuration.blocklisted_response.call(env)
         else
-          configuration.blocklisted_callback.call(@app, env)
+          configuration.blocklisted_responder.call(@app, env)
         end
       elsif configuration.throttled?(request)
         # Deprecated: Keeping throttled_response for backwards compatibility
         if configuration.throttled_response
           configuration.throttled_response.call(env)
         else
-          configuration.throttled_callback.call(@app, env)
+          configuration.throttled_responder.call(@app, env)
         end
       else
         configuration.tracked?(request)
